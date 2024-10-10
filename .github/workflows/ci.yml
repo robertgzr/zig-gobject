@@ -1,0 +1,72 @@
+on:
+  workflow_dispatch:
+    inputs:
+      gnome_sdk:
+        required: true
+        type: choice
+        options: [46, 47]
+      zig_version:
+        required: true
+        type: choice
+        options: ['master', '0.13.0']
+
+jobs:
+  bindings:
+    strategy:
+      matrix:
+        # XXX: this is a bit ugly and only really useful to make triggering
+        # workflows that diverge from the default job config.
+        gnome_sdk: ${{ fromJSON(inputs.gnome_sdk && format('[{0}]', inputs.gnome_sdk) || '[46]') }}
+        zig_version: ${{ fromJSON(inputs.zig_version && format('["{0}"]', inputs.zig_version) || '["master"]') }}
+
+    name: GNOME ${{ matrix.gnome_sdk }} @ zig (${{ matrix.zig_version }})
+    runs-on: ubuntu-latest
+    container:
+      image: bilelmoussaoui/flatpak-github-actions:gnome-${{ matrix.gnome_sdk }}
+      options: --privileged
+    env:
+      ZIG_VERSION: ${{ matrix.zig_version }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install zig from repository
+      if: ${{ env.ZIG_VERSION == 'fromFedoraRepo' }}
+      run: |
+          dnf -y install zig
+    - name: Download zig (latest master)
+      if: ${{ env.ZIG_VERSION == 'master' }}
+      run: |
+          set -ex
+          dnf -y install jq
+          version=$(curl -sSfL 'https://ziglang.org/download/index.json' | 
+            jq -r '.master."x86_64-linux".tarball')
+          curl -sSfL "${version}" | tar xJf - -C /usr/local/bin/ --strip-components=1
+    - name: Download zig version ${{ env.ZIG_VERSION }}
+      if: ${{ !contains(fromJSON('["fromFedoraRepo", "master"]'), env.ZIG_VERSION) }}
+      run: |
+          set -ex
+          curl -sSfL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" |
+            tar xJf - -C /usr/local/bin/ --strip-components=1
+    - name: Install libxslt
+      run: |
+          dnf -y install libxslt
+    - name: Generate bindings
+      run: |
+          set -ex
+          zig build codegen \
+            -Dgir-profile=gnome46 \
+            -Dgir-files-path=/var/lib/flatpak/runtime/org.gnome.Sdk/x86_64/${{ matrix.gnome_sdk }}/active/files/share/gir-1.0/
+    # XXX: needs https://github.com/actions/upload-artifact/issues/426
+    # - name: Create zstd-compressed tarball
+    #   run: |
+    #       set -ex
+    #       tar cf bindings.tar.zst --zstd -C zig-out/ ./bindings
+    - name: Install node
+      if: ${{ env.ACT }} # only needed when running locally
+      run: |
+          dnf -y install nodejs
+    - name: Upload bindings
+      uses: actions/upload-artifact@v4
+      with:
+        name: bindings-gnome${{ matrix.gnome_sdk }}
+        path: zig-out/
+        compression-level: 9
